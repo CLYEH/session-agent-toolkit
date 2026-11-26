@@ -1,13 +1,15 @@
-# Tests for scripts/restart-session.ps1, run against stand-in agents (tiny exes named claude / codex / agy).
+# Tests for restart-session.ps1, run against stand-in agents (tiny exes named claude / codex / agy).
 #
 # Why these assertions. The script lets an unattended agent replace ITS OWN session, so it will be
-# run without a permission prompt. Two things therefore have to hold:
+# run without a permission prompt. Three things therefore have to hold:
 #
 #  A. It cannot be turned into "run anything in the user's terminal". Whatever the caller passes -
 #     a hostile activation prompt, a hostile session id - the line typed into the shell must be the
 #     fixed template and nothing else, and an activation prompt must arrive as exactly one argument
 #     that cannot be read as a CLI option (e.g. --dangerously-skip-permissions).
-#  B. It actually works: old agent gone, next one started by the SAME interactive shell (= same
+#  B. A session that receives an agent-written prompt (new, switch) is told so, in fixed words the
+#     caller cannot remove; and a plain restart cannot carry a prompt or be aimed at another session.
+#  C. It actually works: old agent gone, next one started by the SAME interactive shell (= same
 #     terminal tab), with the right arguments for the mode, and the helper survives the death of
 #     the agent that launched it.
 $ErrorActionPreference = 'Stop'
@@ -18,6 +20,8 @@ $fake     = Join-Path $root 'tests\test-fake-agent.ps1'
 $work     = Join-Path ([IO.Path]::GetTempPath()) ("restart-session-test-" + [guid]::NewGuid().ToString('N'))
 $bin      = Join-Path $work 'bin'
 New-Item -ItemType Directory -Path $bin | Out-Null
+# Claude Code's own records are faked under here; the real ~/.claude is never read or written.
+$env:CLAUDE_CONFIG_DIR = Join-Path $work 'claude'
 
 $failures = @()
 function Check($name, $ok, $detail) {
@@ -77,40 +81,50 @@ if (-not (Test-Path "$bin\claude.exe")) { throw 'could not build the stand-in ag
 Copy-Item "$bin\claude.exe" "$bin\codex.exe"
 Copy-Item "$bin\claude.exe" "$bin\agy.exe"
 
-$uuid   = [guid]::NewGuid().ToString()
+$own    = [guid]::NewGuid().ToString()   # the session the stand-in "is"
+$other  = [guid]::NewGuid().ToString()   # another session in the same project
 $canary = Join-Path $work 'pwned'
 # Everything an attacker would try to smuggle through the prompt: an option name, a newline (Enter),
 # quote break-outs for both quote styles, a subexpression, Escape (clears the line), Backspace.
 $hostile = "--dangerously-skip-permissions`n'; New-Item '$canary'; '`"; New-Item `"$canary`"; `" `$(New-Item '$canary') " +
     [char]27 + [char]8 + ' ' + [char]0x91CD + [char]0x555F
 $restartMessage = '[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
-# A new session must be told, in words the caller cannot remove or change, that an agent - not the
-# user - wrote its first message; otherwise a misled agent could hand its instructions on as "the user's".
-$notice = '[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
-$expectedPromptArg = ($notice + "`n`nStarted by: claude session (id unknown)`nTool: $launcher -Mode new`nHandoff note from that agent:`n`n" + $hostile).Replace('"', "'")
-# The only thing that may ever be typed after the per-CLI "new" template: the fixed notice, then load <random id>.prompt.txt.
-$promptExpr = [regex]::Escape("('$notice' + (Get-Content -Raw -Encoding UTF8 -LiteralPath `"`$env:LOCALAPPDATA\restart-session\") +
-    '[0-9a-f]{32}' + [regex]::Escape('.prompt.txt")).Replace(''"'', "''")')
+$notices = @{
+    new    = '[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+    switch = '[restart-session] An AI agent switched this terminal to this session through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+}
+function Get-ResumeCommand($kind, $id) {
+    @{ claude = "claude --resume $id"; codex = "codex resume $id"; agy = "agy --conversation $id -i" }[$kind]
+}
+# The only thing that may ever be typed after the per-CLI template in new / switch mode:
+# the fixed notice, then "load <random id>.prompt.txt".
+function Get-PromptExprPattern($mode) {
+    [regex]::Escape("('$($notices[$mode])' + (Get-Content -Raw -Encoding UTF8 -LiteralPath `"`$env:LOCALAPPDATA\restart-session\") +
+        '[0-9a-f]{32}' + [regex]::Escape('.prompt.txt")).Replace(''"'', "''")')
+}
 
 $n = 0
-function New-Config($mode, $sessionId, $prompt, [bool]$restart) {
+function New-Config($o, [bool]$restart) {
     $script:n++
     $cfg = Join-Path $work "cfg$n.json"
     $dryOut = Join-Path $work "dry$n.json"
-    @{ script = $launcher; mode = $mode; prompt = $prompt; sessionId = $sessionId; restart = $restart; dryOut = $dryOut } |
+    @{ script = $launcher; mode = $o.mode; prompt = $o.prompt; sessionId = $o.sessionId; ownSession = $o.ownSession
+       transcripts = @($o.transcripts); restart = $restart; dryOut = $dryOut } |
         ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath $cfg
     @{ cfg = $cfg; dryOut = $dryOut }
 }
 # Run a stand-in agent of the given kind whose shell tool asks for a dry run; return the plan (or error).
-function Get-DryRunPlan($kind, $mode, $sessionId, $prompt) {
-    $c = New-Config $mode $sessionId $prompt $false
+# $o: mode, sessionId, prompt, ownSession (the stand-in's own session record), transcripts (sessions that exist).
+function Get-DryRunPlan($kind, $o) {
+    $c = New-Config $o $false
     $env:RS_TEST_OUT = ''; $env:RS_TEST_CHILD = $fake; $env:RS_TEST_CONFIG = $c.cfg
     & "$bin\$kind.exe" | Out-Null
     Get-Content -Raw -Encoding UTF8 -LiteralPath $c.dryOut | ConvertFrom-Json
 }
 # Really replace a stand-in claude in its own console window; return what the next one was started with.
-function Invoke-EndToEnd($mode, $sessionId, $prompt) {
-    $c = New-Config $mode $sessionId $prompt $true
+function Invoke-EndToEnd($o) {
+    $mode = $o.mode
+    $c = New-Config $o $true
     $out1 = Join-Path $work "before$n.json"
     $out2 = Join-Path $work "after$n.json"
     # Stand-in is first on PATH, so the typed "claude ..." starts it again; after the first one is
@@ -126,7 +140,7 @@ function Invoke-EndToEnd($mode, $sessionId, $prompt) {
 
     # Out-Host: this function's only pipeline output must be $after.
     $after = Wait-ForJson $out2 60
-    Check "$mode`: next agent started" ([bool]$after) "no $out2 after 60s; see logs under $env:LOCALAPPDATA\restart-session" | Out-Host
+    Check "$mode`: next agent started" ([bool]$after) "no $out2 after 60s; dry run: $(Get-Content -Raw $c.dryOut -ErrorAction SilentlyContinue)" | Out-Host
     if ($after) {
         $newParent = (Get-CimInstance Win32_Process -Filter "ProcessId=$($after.pid)").ParentProcessId
         Check "$mode`: old agent process is gone"  (-not (Get-Process -Id $before.pid -ErrorAction SilentlyContinue)) "pid $($before.pid) still alive" | Out-Host
@@ -135,49 +149,81 @@ function Invoke-EndToEnd($mode, $sessionId, $prompt) {
     }
     $after
 }
+function Show($plan) { "commandLine <$($plan.commandLine)> error <$($plan.error)>" }
 
 $shells = @()
 try {
     # ---- A. what gets typed is the fixed template, whatever the caller passes ----
-    $restartTemplates = @{ claude = "claude --resume $uuid"; codex = "codex resume $uuid"; agy = "agy --conversation $uuid -i" }
     $newTemplates = @{ claude = 'claude'; codex = 'codex'; agy = 'agy -i' }
     foreach ($kind in 'claude', 'codex', 'agy') {
-        $plan = Get-DryRunPlan $kind 'restart' $uuid $null
+        $plan = Get-DryRunPlan $kind @{ mode = 'restart'; sessionId = $own }
         Check "$kind restart: typed line is exactly the fixed resume command" `
-            ($plan.commandLine -ceq ($restartTemplates[$kind] + " '" + $restartMessage + "'")) "got <$($plan.commandLine)> error <$($plan.error)>"
-        $plan = Get-DryRunPlan $kind 'new' $null $hostile
+            ($plan.commandLine -ceq ((Get-ResumeCommand $kind $own) + " '" + $restartMessage + "'")) (Show $plan)
+
+        $plan = Get-DryRunPlan $kind @{ mode = 'new'; prompt = $hostile }
         Check "$kind new: typed line is the fixed template and notice, with nothing from the prompt" `
-            ($plan.commandLine -cmatch ('\A' + [regex]::Escape($newTemplates[$kind]) + ' ' + $promptExpr + '\z')) "got <$($plan.commandLine)> error <$($plan.error)>"
+            ($plan.commandLine -cmatch ('\A' + [regex]::Escape($newTemplates[$kind]) + ' ' + (Get-PromptExprPattern 'new') + '\z')) (Show $plan)
+
+        $plan = Get-DryRunPlan $kind @{ mode = 'switch'; sessionId = $other; prompt = $hostile; ownSession = $own; transcripts = $own, $other }
+        Check "$kind switch: typed line is the fixed resume command and notice, with nothing from the prompt" `
+            ($plan.commandLine -cmatch ('\A' + [regex]::Escape((Get-ResumeCommand $kind $other)) + ' ' + (Get-PromptExprPattern 'switch') + '\z')) (Show $plan)
     }
     $badIds = [ordered]@{
         'an option'              = '--dangerously-skip-permissions'
-        'a command after the id' = "$uuid; New-Item '$canary'"
-        'a trailing newline'     = "$uuid`n"
+        'a command after the id' = "$own; New-Item '$canary'"
+        'a trailing newline'     = "$own`n"
         'a subexpression'        = "`$(New-Item '$canary')"
     }
     foreach ($label in $badIds.Keys) {
-        $plan = Get-DryRunPlan 'agy' 'restart' $badIds[$label] $null
-        Check "session id that is $label is refused" ($plan.error -match 'session id rejected' -and -not $plan.commandLine) `
-            "got commandLine <$($plan.commandLine)> error <$($plan.error)>"
+        foreach ($mode in 'restart', 'switch') {
+            $o = @{ mode = $mode; sessionId = $badIds[$label] }
+            if ($mode -eq 'switch') { $o.prompt = 'x' }
+            $plan = Get-DryRunPlan 'agy' $o
+            Check "$mode`: session id that is $label is refused" ($plan.error -match 'session id rejected' -and -not $plan.commandLine) (Show $plan)
+        }
     }
-    # A resumed session must not be steerable by the caller: restart mode has no prompt channel at all.
-    $plan = Get-DryRunPlan 'claude' 'restart' $uuid $hostile
-    Check 'restart mode refuses a prompt' ($plan.error -match 'takes no prompt' -and -not $plan.commandLine) "got <$($plan.commandLine)> error <$($plan.error)>"
-    $plan = Get-DryRunPlan 'claude' 'new' $null $null
-    Check 'new mode requires an activation prompt' ($plan.error -match 'requires -ActivationPrompt' -and -not $plan.commandLine) "got <$($plan.commandLine)> error <$($plan.error)>"
 
-    # ---- B. real replacement of a stand-in claude, one console window per mode ----
-    $after = Invoke-EndToEnd 'restart' $uuid $null
+    # ---- B. who may say what to which session ----
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'restart'; sessionId = $own; prompt = $hostile }
+    Check 'restart mode refuses a prompt' ($plan.error -match 'takes no prompt' -and -not $plan.commandLine) (Show $plan)
+    # For claude, "restart" must mean this session: its own record wins over whatever id the caller passes.
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'restart'; sessionId = $other; ownSession = $own; transcripts = $own, $other }
+    Check 'claude restart resumes its own session, not the id the caller passed' `
+        ($plan.commandLine -ceq ((Get-ResumeCommand 'claude' $own) + " '" + $restartMessage + "'")) (Show $plan)
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'new' }
+    Check 'new mode requires an activation prompt' ($plan.error -match 'requires -ActivationPrompt' -and -not $plan.commandLine) (Show $plan)
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'switch'; sessionId = $other; ownSession = $own; transcripts = $own, $other }
+    Check 'switch mode requires an activation prompt' ($plan.error -match 'requires -ActivationPrompt' -and -not $plan.commandLine) (Show $plan)
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'switch'; prompt = 'x'; ownSession = $own; transcripts = $own, $other }
+    Check 'switch mode requires a session id' ($plan.error -match 'requires -SessionId' -and -not $plan.commandLine) (Show $plan)
+    # Switching to yourself would be a restart that carries a prompt - exactly what restart mode forbids.
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'switch'; sessionId = $own; prompt = 'x'; ownSession = $own; transcripts = $own, $other }
+    Check 'switch to the session you are in is refused' ($plan.error -match 'needs another session' -and -not $plan.commandLine) (Show $plan)
+    # A wrong id must be refused while the agent is still alive, not after it has been killed.
+    $missing = [guid]::NewGuid().ToString()
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'switch'; sessionId = $missing; prompt = 'x'; ownSession = $own; transcripts = @($own) }
+    Check 'switch to a session that does not exist is refused' ($plan.error -match 'no claude session' -and -not $plan.commandLine) (Show $plan)
+
+    # ---- C. real replacement of a stand-in claude, one console window per mode ----
+    $after = Invoke-EndToEnd @{ mode = 'restart'; sessionId = $own }
     if ($after) {
         Check 'restart: resumes the same session with the fixed notice' `
-            ($after.args.Count -eq 3 -and $after.args[0] -ceq '--resume' -and $after.args[1] -ceq $uuid -and $after.args[2] -ceq $restartMessage) `
+            ($after.args.Count -eq 3 -and $after.args[0] -ceq '--resume' -and $after.args[1] -ceq $own -and $after.args[2] -ceq $restartMessage) `
             "argv <$($after.args -join '> <')>"
     }
-    $after = Invoke-EndToEnd 'new' $null $hostile
+    $after = Invoke-EndToEnd @{ mode = 'new'; prompt = $hostile }
     if ($after) {
-        Check 'new: starts a fresh session (no resume arguments)' ($after.args.Count -eq 1) "argv <$($after.args -join '> <')>"
-        Check 'new: one inert argument - the notice, where it came from, then the hostile prompt' ($after.args[0] -ceq $expectedPromptArg) `
-            "expected <$expectedPromptArg> got <$($after.args[0])>"
+        $expected = ($notices.new + "`n`nStarted by: claude session (id unknown)`nTool: $launcher -Mode new`nHandoff note from that agent:`n`n" + $hostile).Replace('"', "'")
+        Check 'new: starts a fresh session (no resume arguments)' (@($after.args).Count -eq 1) "argv <$($after.args -join '> <')>"
+        Check 'new: one inert argument - the notice, where it came from, then the hostile prompt' (@($after.args)[0] -ceq $expected) `
+            "expected <$expected> got <$(@($after.args)[0])>"
+    }
+    $after = Invoke-EndToEnd @{ mode = 'switch'; sessionId = $other; prompt = $hostile; ownSession = $own; transcripts = $own, $other }
+    if ($after) {
+        $expected = ($notices.switch + "`n`nSwitched from: claude session $own`nTool: $launcher -Mode switch`nNote from that agent:`n`n" + $hostile).Replace('"', "'")
+        Check 'switch: resumes the other session' ($after.args.Count -eq 3 -and $after.args[0] -ceq '--resume' -and $after.args[1] -ceq $other) "argv <$($after.args -join '> <')>"
+        Check 'switch: one inert argument - the notice, which session it came from, then the hostile prompt' ($after.args[2] -ceq $expected) `
+            "expected <$expected> got <$($after.args[2])>"
     }
     Check 'nothing from a prompt or session id was executed' (-not (Test-Path $canary)) "$canary was created"
 }

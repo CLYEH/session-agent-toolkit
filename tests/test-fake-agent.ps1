@@ -3,6 +3,20 @@
 $ErrorActionPreference = 'Stop'
 $cfg = Get-Content -Raw -Encoding UTF8 -LiteralPath $env:RS_TEST_CONFIG | ConvertFrom-Json
 $me = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+
+# Optionally play Claude Code's own bookkeeping (in the test's CLAUDE_CONFIG_DIR): the per-process
+# record of which session the stand-in is, and transcripts of sessions that exist in its project.
+if ($cfg.ownSession) {
+    New-Item -ItemType Directory -Force -Path "$env:CLAUDE_CONFIG_DIR\sessions" | Out-Null
+    @{ sessionId = $cfg.ownSession } | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath "$env:CLAUDE_CONFIG_DIR\sessions\$($me.ParentProcessId).json"
+}
+foreach ($t in @($cfg.transcripts)) {
+    if ($t) {
+        New-Item -ItemType Directory -Force -Path "$env:CLAUDE_CONFIG_DIR\projects\proj" | Out-Null
+        Set-Content -LiteralPath "$env:CLAUDE_CONFIG_DIR\projects\proj\$t.jsonl" -Value '{}'
+    }
+}
+
 $common = @{ Mode = $cfg.mode; DelaySeconds = 1 }
 if ($cfg.prompt) { $common.ActivationPrompt = $cfg.prompt }
 if ($cfg.sessionId) { $common.SessionId = $cfg.sessionId }

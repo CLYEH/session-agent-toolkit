@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Restart the agent CLI session (claude / codex / agy) that calls this script, or replace it with a
-# brand-new session, in the same terminal. macOS/Linux version; see restart-session.ps1 for Windows.
+# Restart the agent CLI session (claude / codex / agy) that calls this script, replace it with a
+# brand-new session, or switch to another existing session - in the same terminal.
+# macOS/Linux version; see restart-session.ps1 for Windows.
 #
 #   restart-session.sh                                   # claude: resume this conversation
 #   restart-session.sh --session-id <uuid>               # codex / agy: resume this conversation
 #   restart-session.sh --mode new --activation-prompt "Read HANDOFF.md and continue the migration."
+#   restart-session.sh --mode switch --session-id <uuid> --activation-prompt "Subtask done; results are in RESULT.md."
 #   ... --delay-seconds N   seconds to wait before stopping the agent (default 5)
 #   ... --dry-run           print the plan (what would be stopped and typed) and do nothing
 #
@@ -15,16 +17,19 @@
 #   --mode restart (default): resumes the SAME conversation. Its first message is a fixed notice;
 #                             no prompt is accepted.
 #   --mode new:               starts a FRESH conversation whose first message is --activation-prompt.
+#   --mode switch:            resumes ANOTHER existing conversation (--session-id) and gives it
+#                             --activation-prompt as its next message.
 #
 # Safe to run without a permission prompt, because the caller controls very little:
 #   - it can only replace the session it is running inside (found by walking up the process tree);
 #   - the typed command is a fixed template per CLI and mode; the only variable part is a session id
-#     that must be a plain UUID (for claude it is read from claude's own session record);
+#     that must be a plain UUID (in restart mode claude's id is read from its own session record);
 #   - an activation prompt is never typed. It is written to a file and loaded by the typed command
-#     as a single, prefixed argument, so its content cannot become shell syntax or CLI options.
+#     as a single argument behind a fixed notice, so its content cannot become shell syntax or CLI
+#     options, and the receiving session is told that an agent, not the user, wrote it.
 # The typing itself lives in restart-session-helper.sh; do not allow-list that file.
 #
-# Requires the session to be running inside tmux (see the helper for why).
+# The session must be running inside tmux or, on macOS, in Terminal.app (see the helper for why).
 # The next session starts with the CLI's default options (launch flags are not replayed).
 set -euo pipefail
 
@@ -42,16 +47,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+uuid_re='^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+
 case "$mode" in
-    new)
-        [ -n "$prompt" ] || die "--mode new requires --activation-prompt (the first message of the new session)"
-        [ "${#prompt}" -le 4000 ] || die "--activation-prompt is longer than 4000 characters"
-        [ -z "$session_id" ] || die "--session-id only applies to --mode restart"
-        ;;
     restart)
         [ -z "$prompt" ] || die "--mode restart takes no prompt: the resumed session gets a fixed restart notice. Use --mode new to start a fresh session with a prompt."
         ;;
-    *) die "--mode must be restart or new" ;;
+    new|switch)
+        [ -n "$prompt" ] || die "--mode $mode requires --activation-prompt (the first message the next session receives)"
+        [ "${#prompt}" -le 4000 ] || die "--activation-prompt is longer than 4000 characters"
+        if [ "$mode" = new ]; then
+            [ -z "$session_id" ] || die "--session-id does not apply to --mode new"
+        else
+            [ -n "$session_id" ] || die "--mode switch requires --session-id (the session to switch to)"
+            [[ $session_id =~ $uuid_re ]] || die "session id rejected: it must be a plain UUID"
+        fi
+        ;;
+    *) die "--mode must be restart, new or switch" ;;
 esac
 
 trim() { local s=$1; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
@@ -84,11 +96,12 @@ done
 [ -n "$kind" ] || die "not running inside a claude / codex / agy session (no such ancestor process)"
 
 # What the CLI itself says the current session is, when it says so.
+claude_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 own_session=""
 case "$kind" in
     claude)
-        if [ -f "$HOME/.claude/sessions/$agent_pid.json" ]; then
-            own_session=$(sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.claude/sessions/$agent_pid.json" | head -n 1)
+        if [ -f "$claude_dir/sessions/$agent_pid.json" ]; then
+            own_session=$(sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$claude_dir/sessions/$agent_pid.json" | head -n 1)
         fi ;;
     codex) own_session=${CODEX_THREAD_ID:-${CODEX_SESSION_ID-}} ;;
     agy)   own_session=${ANTIGRAVITY_CONVERSATION_ID-} ;;
@@ -100,6 +113,26 @@ if [ "$mode" = restart ]; then
     if [ "$kind" = claude ] && [ -n "$own_session" ]; then session_id=$own_session; fi
     [ -n "$session_id" ] || session_id=$own_session
     [ -n "$session_id" ] || die "--session-id is required: could not determine the current $kind session id"
+elif [ "$mode" = switch ]; then
+    # Switching to yourself would be a restart with a prompt, which restart mode deliberately has not.
+    if [ -n "$own_session" ] && [ "$session_id" = "$own_session" ]; then
+        die "--mode switch needs another session: that id is the session you are in. Use --mode restart to restart it."
+    fi
+    if [ "$kind" = claude ]; then
+        # claude can only resume a session from the project it belongs to. Refuse now, while this
+        # session is still alive, rather than leave the terminal with a failed command and no agent.
+        found=0; own_project=""
+        if [ -n "$own_session" ]; then
+            for d in "$claude_dir"/projects/*/; do
+                if [ -f "$d$own_session.jsonl" ]; then own_project=$d; break; fi
+            done
+        fi
+        for d in "$claude_dir"/projects/*/; do
+            if [ -n "$own_project" ] && [ "$d" != "$own_project" ]; then continue; fi
+            if [ -f "$d$session_id.jsonl" ]; then found=1; break; fi
+        done
+        [ "$found" = 1 ] || die "no claude session $session_id to switch to in this project"
+    fi
 fi
 
 if [ "$kind" = codex ]; then
@@ -115,13 +148,17 @@ find "$state_dir" -type f -mtime +7 -exec rm -f {} + 2>/dev/null || true
 job_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 prompt_file="$state_dir/$job_id.prompt.txt"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ "$mode" = new ]; then
-    # Tell the new session where it came from. This continues the fixed notice the helper types in
-    # front (which says an agent, not the user, wrote what follows).
-    uuid_re='^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+if [ "$mode" != restart ]; then
+    # Tell the receiving session where this came from. It continues the fixed notice the helper
+    # types in front (which says an agent, not the user, wrote what follows).
     if [[ $own_session =~ $uuid_re ]]; then origin="$kind session $own_session"; else origin="$kind session (id unknown)"; fi
-    printf '\n\nStarted by: %s\nTool: %s --mode new\nHandoff note from that agent:\n\n%s' \
-        "$origin" "$here/restart-session.sh" "$prompt" > "$prompt_file"
+    if [ "$mode" = new ]; then
+        printf '\n\nStarted by: %s\nTool: %s --mode new\nHandoff note from that agent:\n\n%s' \
+            "$origin" "$here/restart-session.sh" "$prompt" > "$prompt_file"
+    else
+        printf '\n\nSwitched from: %s\nTool: %s --mode switch\nNote from that agent:\n\n%s' \
+            "$origin" "$here/restart-session.sh" "$prompt" > "$prompt_file"
+    fi
 fi
 
 # The helper validates everything and builds the command line; ask it for the plan before committing.
@@ -147,10 +184,10 @@ else
     die "cannot detach the helper: neither setsid nor perl is available"
 fi
 
-if [ "$mode" = new ]; then
-    echo "A new session replaces this one in $delay s. End your turn now - do not start more work."
-else
-    echo "This session restarts in $delay s. End your turn now - do not start more work."
-fi
+case "$mode" in
+    new)    echo "A new session replaces this one in $delay s. End your turn now - do not start more work." ;;
+    switch) echo "This terminal switches to session $session_id in $delay s. End your turn now - do not start more work." ;;
+    *)      echo "This session restarts in $delay s. End your turn now - do not start more work." ;;
+esac
 printf '%s\n' "$plan"
 echo "log: $state_dir/$job_id.log"

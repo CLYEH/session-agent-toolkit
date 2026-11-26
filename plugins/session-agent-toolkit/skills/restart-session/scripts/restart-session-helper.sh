@@ -5,8 +5,8 @@
 # next command into the shell that launched it.
 #
 # This file owns everything that ends up on the user's command line, so that the typed text is
-# never caller-controlled: a fixed template per CLI and mode, plus a UUID (restart) or a random
-# file id (new). A new session's activation prompt is read from a file by the typed command
+# never caller-controlled: a fixed template per CLI and mode, plus a UUID (restart, switch) and/or
+# a random file id (new, switch). An activation prompt is read from a file by the typed command
 # itself; it is never typed.
 #
 # Typing into a terminal from outside has no universal mechanism on macOS/Linux. Supported:
@@ -23,6 +23,7 @@ RESTART_MESSAGE='[restart-session] This session was restarted by the restart-ses
 # caller cannot remove or reword it: the new session must not mistake an agent's handoff note for
 # something the user typed. Must stay free of quote characters, $, ` and ! (it is typed inside "...").
 NEW_SESSION_NOTICE='[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+SWITCH_NOTICE='[restart-session] An AI agent switched this terminal to this session through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
 STATE_DIR="$HOME/.local/state/restart-session"
 log=""
 
@@ -91,12 +92,12 @@ jobid_re='^[0-9a-f]{32}$'
 num_re='^[0-9]+$'
 pane_re='^%[0-9]+$'
 
-case "$mode" in restart|new) ;; *) die "unknown mode '$mode'" ;; esac
+case "$mode" in restart|new|switch) ;; *) die "unknown mode '$mode'" ;; esac
 case "$kind" in claude|codex|agy) ;; *) die "unknown agent kind '$kind'" ;; esac
 [[ $job_id =~ $jobid_re ]] || die 'job id rejected'
 [[ $agent_pid =~ $num_re ]] || die 'agent pid rejected'
 { [[ $delay =~ $num_re ]] && [ "$delay" -ge 1 ] && [ "$delay" -le 600 ]; } || die 'delay must be between 1 and 600 seconds'
-if [ "$mode" = restart ]; then
+if [ "$mode" != new ]; then
     [[ $session_id =~ $uuid_re ]] || die 'session id rejected: it must be a plain UUID'
 fi
 
@@ -136,27 +137,29 @@ make_plan() {
     fi
     [ -n "$terminal" ] || die "cannot type into this terminal ($tty_dev): supported are tmux and, on macOS, Terminal.app"
 
-    case "$mode" in
-        restart)
-            case "$kind" in
-                claude) cmd="claude --resume $session_id" ;;
-                codex)  cmd="codex resume $session_id" ;;
-                agy)    cmd="agy --conversation $session_id -i" ;;
-            esac
-            cmd="$cmd '$RESTART_MESSAGE'"
-            ;;
-        new)
-            case "$kind" in
-                claude) cmd="claude" ;;
-                codex)  cmd="codex" ;;
-                agy)    cmd="agy -i" ;;
-            esac
-            # The activation prompt is loaded by the user's shell from a file, inside double quotes, so
-            # it is handed over as ONE argument and is never re-read as shell syntax. The fixed notice
-            # in front also means it can never start with '-' and be parsed as a CLI option.
-            cmd="$cmd \"$NEW_SESSION_NOTICE\$(cat \"\$HOME/.local/state/restart-session/$job_id.prompt.txt\")\""
-            ;;
-    esac
+    if [ "$mode" = new ]; then
+        case "$kind" in
+            claude) cmd="claude" ;;
+            codex)  cmd="codex" ;;
+            agy)    cmd="agy -i" ;;
+        esac
+    else   # restart and switch: the same resume command, aimed at this session or at another one
+        case "$kind" in
+            claude) cmd="claude --resume $session_id" ;;
+            codex)  cmd="codex resume $session_id" ;;
+            agy)    cmd="agy --conversation $session_id -i" ;;
+        esac
+    fi
+    if [ "$mode" = restart ]; then
+        cmd="$cmd '$RESTART_MESSAGE'"
+    else
+        local notice=$NEW_SESSION_NOTICE
+        if [ "$mode" = switch ]; then notice=$SWITCH_NOTICE; fi
+        # The activation prompt is loaded by the user's shell from a file, inside double quotes, so
+        # it is handed over as ONE argument and is never re-read as shell syntax. The fixed notice
+        # in front also means it can never start with '-' and be parsed as a CLI option.
+        cmd="$cmd \"$notice\$(cat \"\$HOME/.local/state/restart-session/$job_id.prompt.txt\")\""
+    fi
 }
 
 if [ "$plan_only" = 1 ]; then

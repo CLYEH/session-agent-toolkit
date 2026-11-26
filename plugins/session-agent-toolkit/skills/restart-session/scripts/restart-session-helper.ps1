@@ -7,8 +7,8 @@
   kills the agent process tree and types the restart command into the shell that launched it.
 
   This file owns everything that ends up on the user's command line, so that the typed text is
-  never caller-controlled: a fixed template per CLI and mode, plus a UUID (restart) or a random
-  file id (new). A new session's activation prompt is read from a file by the typed command
+  never caller-controlled: a fixed template per CLI and mode, plus a UUID (restart, switch) and/or
+  a random file id (new, switch). An activation prompt is read from a file by the typed command
   itself; it is never typed.
 #>
 [CmdletBinding()]
@@ -36,13 +36,17 @@ $templates = @{
     restart = @{ claude = 'claude --resume {0}'; codex = 'codex resume {0}'; agy = 'agy --conversation {0} -i' }
     new     = @{ claude = 'claude'; codex = 'codex'; agy = 'agy -i' }
 }
+$templates.switch = $templates.restart   # same resume command, aimed at another session
 # First message of a resumed session. Fixed text: the resumed session can already see, in its own
 # history, that it asked for the restart. Must stay free of quote characters (it is typed inside '...').
 $restartMessage = '[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
-# First words of a new session's first message. Fixed text, typed as part of the command, so the
-# caller cannot remove or reword it: the new session must not mistake an agent's handoff note for
-# something the user typed. Must stay free of quote characters (it is typed inside '...').
-$newSessionNotice = '[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+# First words of the message a new or switched-to session receives. Fixed text, typed as part of
+# the command, so the caller cannot remove or reword it: the receiving session must not mistake
+# an agent's note for something the user typed. Must stay free of quote characters (typed inside '...').
+$notices = @{
+    new    = '[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+    switch = '[restart-session] An AI agent switched this terminal to this session through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+}
 
 function Get-Delay {
     $delay = [int]$job.delaySeconds
@@ -57,7 +61,7 @@ function Get-Plan {
     if (-not $templates[$mode].ContainsKey($kind)) { throw "unknown agent kind '$kind'" }
     # \A..\z, not ^..$: '$' would accept a trailing newline, and a newline typed into a shell is Enter.
     if ("$($job.jobId)" -notmatch '\A[0-9a-f]{32}\z') { throw 'job id rejected' }
-    if ($mode -eq 'restart' -and "$($job.sessionId)" -notmatch '\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z') {
+    if ($mode -ne 'new' -and "$($job.sessionId)" -notmatch '\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z') {
         throw 'session id rejected: it must be a plain UUID'
     }
 
@@ -82,8 +86,8 @@ function Get-Plan {
         #  - double quotes become single quotes, so it cannot split into extra arguments even where
         #    PowerShell passes native arguments the legacy way (Windows PowerShell 5.1).
         $promptPath = '$env:LOCALAPPDATA\restart-session\' + $job.jobId + '.prompt.txt'
-        $commandLine = $templates.new[$kind] +
-            " ('$newSessionNotice' + (Get-Content -Raw -Encoding UTF8 -LiteralPath `"$promptPath`")).Replace('`"', `"'`")"
+        $commandLine = ($templates[$mode][$kind] -f $job.sessionId) +
+            " ('$($notices[$mode])' + (Get-Content -Raw -Encoding UTF8 -LiteralPath `"$promptPath`")).Replace('`"', `"'`")"
     }
 
     [ordered]@{
