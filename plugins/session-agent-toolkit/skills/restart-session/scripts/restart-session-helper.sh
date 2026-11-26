@@ -16,9 +16,12 @@ set -euo pipefail
 plan_only=0
 if [ "${1-}" = "--plan-only" ]; then plan_only=1; shift; fi   # validate and print the plan; stop nothing, type nothing
 
-# First message of a resumed session. Fixed text: the resumed session can already see, in its own
-# history, that it asked for the restart. Must stay free of quote characters (it is typed inside '...').
-RESTART_MESSAGE='[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
+# First message of a restarted session. Fixed text plus the job id as a token: the launcher printed
+# the same token into the tool output of the session that asked, so a session resumed by mistake
+# (any other conversation) can tell that it did not ask. Must stay free of quote characters (typed inside '...').
+restart_message() {
+    printf '%s' "[restart-session] Restart token $1. This session ran the restart-session tool and was restarted at its own request; the user did not type this message. Look for the same token in your own most recent tool output. If it is there, continue where you left off. If it is not, you are not the session that asked for this restart: do not continue any work, and tell the user what happened."
+}
 # First words of a new session's first message. Fixed text, typed as part of the command, so the
 # caller cannot remove or reword it: the new session must not mistake an agent's handoff note for
 # something the user typed. Must stay free of quote characters, $, ` and ! (it is typed inside "...").
@@ -151,7 +154,7 @@ make_plan() {
         esac
     fi
     if [ "$mode" = restart ]; then
-        cmd="$cmd '$RESTART_MESSAGE'"
+        cmd="$cmd '$(restart_message "$job_id")'"
     else
         local notice=$NEW_SESSION_NOTICE
         if [ "$mode" = switch ]; then notice=$SWITCH_NOTICE; fi

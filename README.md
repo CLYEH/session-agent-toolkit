@@ -38,7 +38,7 @@ end, stops the agent process tree, and types the next command into the shell tha
 
 | Mode | What starts next | Typed command (claude) |
 |---|---|---|
-| `restart` (default) | The same conversation, resumed, with a fixed notice as its first message | `claude --resume <session-id> '<fixed restart notice>'` |
+| `restart` (default) | The same conversation, resumed, with a fixed notice as its first message | `claude --resume <own-session-id> '<fixed restart notice with a restart token>'` |
 | `new` | A fresh conversation that starts from an activation prompt | `claude "<fixed notice><origin and activation prompt, loaded from a file>"` |
 | `switch` | Another existing conversation, resumed, with the activation prompt as its next message | `claude --resume <other-session-id> "<fixed notice><origin and activation prompt, loaded from a file>"` |
 
@@ -62,7 +62,14 @@ The script is meant to run without a permission prompt, so the caller controls v
 
 - It can only replace the session it runs inside (found by walking up the process tree).
 - The typed command is a fixed template. The only variable part is a session id that must be a
-  plain UUID; where possible it is read from the CLI's own record instead of from the caller.
+  plain UUID.
+- `restart` means "this session" on every CLI and takes no session id from the caller. The id is
+  what the CLI itself reports: Claude Code's per-process session record (found through the agent
+  process, not through the caller's environment), or the id Codex / Antigravity hand to their
+  tools in an environment variable. If the CLI does not say, the script refuses and changes nothing.
+- A restart carries a random token. The script prints it into the calling session's tool output
+  and the restart notice quotes it, telling the session to stop and report if it cannot find the
+  token there. So a conversation that is resumed by mistake can tell it did not ask.
 - `restart` mode has no prompt at all. In `new` mode the activation prompt is never typed: it is
   written to a file and loaded by the typed command as one prefixed argument, so it cannot become
   shell syntax or a CLI option.

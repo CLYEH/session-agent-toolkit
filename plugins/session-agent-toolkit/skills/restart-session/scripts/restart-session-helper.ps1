@@ -37,9 +37,10 @@ $templates = @{
     new     = @{ claude = 'claude'; codex = 'codex'; agy = 'agy -i' }
 }
 $templates.switch = $templates.restart   # same resume command, aimed at another session
-# First message of a resumed session. Fixed text: the resumed session can already see, in its own
-# history, that it asked for the restart. Must stay free of quote characters (it is typed inside '...').
-$restartMessage = '[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
+# First message of a restarted session. Fixed text plus the job id as a token: the launcher printed
+# the same token into the tool output of the session that asked, so a session resumed by mistake
+# (any other conversation) can tell that it did not ask. Must stay free of quote characters (typed inside '...').
+$restartMessage = '[restart-session] Restart token {0}. This session ran the restart-session tool and was restarted at its own request; the user did not type this message. Look for the same token in your own most recent tool output. If it is there, continue where you left off. If it is not, you are not the session that asked for this restart: do not continue any work, and tell the user what happened.'
 # First words of the message a new or switched-to session receives. Fixed text, typed as part of
 # the command, so the caller cannot remove or reword it: the receiving session must not mistake
 # an agent's note for something the user typed. Must stay free of quote characters (typed inside '...').
@@ -78,7 +79,7 @@ function Get-Plan {
     }
 
     if ($mode -eq 'restart') {
-        $commandLine = ($templates.restart[$kind] -f $job.sessionId) + " '" + $restartMessage + "'"
+        $commandLine = ($templates.restart[$kind] -f $job.sessionId) + " '" + ($restartMessage -f $job.jobId) + "'"
     }
     else {
         # The activation prompt is loaded by the user's shell from a file and handed over as ONE argument:

@@ -11,8 +11,9 @@
     3. types a command into the interactive shell that launched the agent, so the next session
        starts in the same tab.
 
-  -Mode restart (default): resumes the SAME conversation. Its first message is a fixed notice;
-                           no prompt is accepted.
+  -Mode restart (default): resumes the SAME conversation - always the one this script is called
+                           from, on every CLI. Its first message is a fixed notice carrying a
+                           restart token; no prompt and no session id are accepted.
   -Mode new:               starts a FRESH conversation whose first message is -ActivationPrompt.
   -Mode switch:            resumes ANOTHER existing conversation (-SessionId) and gives it
                            -ActivationPrompt as its next message.
@@ -20,7 +21,10 @@
   Safe to run without a permission prompt, because the caller controls very little:
     - it can only replace the session it is running inside (found by walking up the process tree);
     - the typed command is a fixed template per CLI and mode; the only variable part is a session
-      id that must be a plain UUID (in restart mode claude's id is read from its own session record);
+      id that must be a plain UUID. In restart mode it never comes from the caller: it is what the
+      CLI itself reports (claude: its session record; codex / agy: the id they give their tools);
+    - a restart carries a random token that is also printed here, in the calling session's tool
+      output, so a session that is resumed by mistake can tell it did not ask for the restart;
     - an activation prompt is never typed. It is written to a file and loaded by the typed command
       as a single argument behind a fixed notice, so its content cannot become shell syntax or CLI
       options, and the receiving session is told that an agent, not the user, wrote it.
@@ -30,15 +34,12 @@
   The next session starts with the CLI's default options (launch flags are not replayed).
 
 .EXAMPLE
-  restart-session.ps1                                              # claude: resume this conversation
-  restart-session.ps1 -SessionId <uuid>                            # codex / agy: resume this conversation
+  restart-session.ps1                                              # resume this conversation
   restart-session.ps1 -Mode new -ActivationPrompt "Read HANDOFF.md and continue the migration."
   restart-session.ps1 -Mode switch -SessionId <uuid> -ActivationPrompt "Subtask done; results are in RESULT.md."
 
 .PARAMETER SessionId
-  Restart mode: session / conversation UUID to resume. Required for codex and agy; ignored for
-  claude when its session record is available.
-  Switch mode: the UUID of the other session to switch to. Required.
+  Switch mode only: the UUID of the other session to switch to. Required there.
 
 .PARAMETER DryRun
   Print the plan (what would be killed and typed) as JSON and do nothing.
@@ -68,6 +69,9 @@ $uuidPattern = '\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z'
 if ($Mode -eq 'restart') {
     if ($ActivationPrompt) {
         throw '-Mode restart takes no prompt: the resumed session gets a fixed restart notice. Use -Mode new to start a fresh session with a prompt.'
+    }
+    if ($SessionId) {
+        throw '-Mode restart takes no session id: it always resumes the session it is called from. To go to another session use -Mode switch.'
     }
 }
 else {
@@ -158,11 +162,12 @@ elseif ($kind -eq 'codex') { $ownSession = if ($env:CODEX_THREAD_ID) { $env:CODE
 elseif ($kind -eq 'agy') { $ownSession = $env:ANTIGRAVITY_CONVERSATION_ID }
 
 if ($Mode -eq 'restart') {
-    # claude keeps a per-process record, which beats what the caller passed; for the others the
-    # environment is only a fallback.
-    if ($kind -eq 'claude' -and $ownSession) { $SessionId = $ownSession }
-    if (-not $SessionId) { $SessionId = $ownSession }
-    if (-not $SessionId) { throw "-SessionId is required: could not determine the current $kind session id" }
+    # Restart means "this session" on every CLI, so the id is the CLI's word, never the caller's.
+    # If the CLI does not say, refuse rather than guess.
+    if ("$ownSession" -notmatch $uuidPattern) {
+        throw "cannot tell which $kind session this is, so it cannot be restarted. Nothing was changed. To go to a specific session use -Mode switch -SessionId <id>."
+    }
+    $SessionId = $ownSession
 }
 elseif ($Mode -eq 'switch') {
     # Switching to yourself would be a restart with a prompt, which restart mode deliberately has not.
@@ -239,7 +244,11 @@ if ($created.ReturnValue -ne 0) { throw "could not start the helper process (Win
 switch ($Mode) {
     'new'    { "A new session replaces this one in $DelaySeconds s. End your turn now - do not start more work." }
     'switch' { "This terminal switches to session $SessionId in $DelaySeconds s. End your turn now - do not start more work." }
-    default  { "This session restarts in $DelaySeconds s. End your turn now - do not start more work." }
+    default  {
+        "This session restarts in $DelaySeconds s. End your turn now - do not start more work."
+        # The restart notice will quote this token; only the session that sees it here asked for the restart.
+        "restart token: $id"
+    }
 }
 $plan
 "log: " + (Join-Path $dir "$id.log")

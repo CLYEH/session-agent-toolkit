@@ -3,8 +3,7 @@
 # brand-new session, or switch to another existing session - in the same terminal.
 # macOS/Linux version; see restart-session.ps1 for Windows.
 #
-#   restart-session.sh                                   # claude: resume this conversation
-#   restart-session.sh --session-id <uuid>               # codex / agy: resume this conversation
+#   restart-session.sh                                   # resume this conversation
 #   restart-session.sh --mode new --activation-prompt "Read HANDOFF.md and continue the migration."
 #   restart-session.sh --mode switch --session-id <uuid> --activation-prompt "Subtask done; results are in RESULT.md."
 #   ... --delay-seconds N   seconds to wait before stopping the agent (default 5)
@@ -14,8 +13,9 @@
 # agent can finish its turn, stops the agent, and types a command into the shell that launched it,
 # so the next session starts in the same terminal.
 #
-#   --mode restart (default): resumes the SAME conversation. Its first message is a fixed notice;
-#                             no prompt is accepted.
+#   --mode restart (default): resumes the SAME conversation - always the one this script is called
+#                             from, on every CLI. Its first message is a fixed notice carrying a
+#                             restart token; no prompt and no session id are accepted.
 #   --mode new:               starts a FRESH conversation whose first message is --activation-prompt.
 #   --mode switch:            resumes ANOTHER existing conversation (--session-id) and gives it
 #                             --activation-prompt as its next message.
@@ -23,7 +23,10 @@
 # Safe to run without a permission prompt, because the caller controls very little:
 #   - it can only replace the session it is running inside (found by walking up the process tree);
 #   - the typed command is a fixed template per CLI and mode; the only variable part is a session id
-#     that must be a plain UUID (in restart mode claude's id is read from its own session record);
+#     that must be a plain UUID. In restart mode it never comes from the caller: it is what the CLI
+#     itself reports (claude: its session record; codex / agy: the id they give their tools);
+#   - a restart carries a random token that is also printed here, in the calling session's tool
+#     output, so a session that is resumed by mistake can tell it did not ask for the restart;
 #   - an activation prompt is never typed. It is written to a file and loaded by the typed command
 #     as a single argument behind a fixed notice, so its content cannot become shell syntax or CLI
 #     options, and the receiving session is told that an agent, not the user, wrote it.
@@ -52,6 +55,7 @@ uuid_re='^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
 case "$mode" in
     restart)
         [ -z "$prompt" ] || die "--mode restart takes no prompt: the resumed session gets a fixed restart notice. Use --mode new to start a fresh session with a prompt."
+        [ -z "$session_id" ] || die "--mode restart takes no session id: it always resumes the session it is called from. To go to another session use --mode switch."
         ;;
     new|switch)
         [ -n "$prompt" ] || die "--mode $mode requires --activation-prompt (the first message the next session receives)"
@@ -102,7 +106,14 @@ agent_env() {   # NAME -> that variable in the agent process's environment, or n
     if [ -r "/proc/$agent_pid/environ" ]; then
         tr '\0' '\n' < "/proc/$agent_pid/environ" | sed -n "s/^$1=//p" | head -n 1
     else
-        ps eww -o command= -p "$agent_pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n 1
+        # macOS: ps can only print the environment glued onto the arguments. Cut the arguments off
+        # first, so that an argument which merely looks like NAME=value (say, inside a prompt) is
+        # never taken for a variable; if the two cannot be told apart, report nothing.
+        local full args
+        full=$(ps eww -o command= -p "$agent_pid" 2>/dev/null) || return 0
+        args=$(ps ww -o command= -p "$agent_pid" 2>/dev/null) || return 0
+        case "$full" in "$args "*) ;; *) return 0 ;; esac
+        printf '%s\n' "${full#"$args "}" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n 1
     fi
 }
 real_home() {   # from the user database, not from $HOME
@@ -127,11 +138,10 @@ case "$kind" in
 esac
 
 if [ "$mode" = restart ]; then
-    # claude keeps a per-process record, which beats what the caller passed; for the others the
-    # environment is only a fallback.
-    if [ "$kind" = claude ] && [ -n "$own_session" ]; then session_id=$own_session; fi
-    [ -n "$session_id" ] || session_id=$own_session
-    [ -n "$session_id" ] || die "--session-id is required: could not determine the current $kind session id"
+    # Restart means "this session" on every CLI, so the id is the CLI's word, never the caller's.
+    # If the CLI does not say, refuse rather than guess.
+    [[ $own_session =~ $uuid_re ]] || die "cannot tell which $kind session this is, so it cannot be restarted. Nothing was changed. To go to a specific session use --mode switch --session-id <id>."
+    session_id=$own_session
 elif [ "$mode" = switch ]; then
     # Switching to yourself would be a restart with a prompt, which restart mode deliberately has not.
     if [ -n "$own_session" ] && [ "$session_id" = "$own_session" ]; then
@@ -206,7 +216,9 @@ fi
 case "$mode" in
     new)    echo "A new session replaces this one in $delay s. End your turn now - do not start more work." ;;
     switch) echo "This terminal switches to session $session_id in $delay s. End your turn now - do not start more work." ;;
-    *)      echo "This session restarts in $delay s. End your turn now - do not start more work." ;;
+    *)      echo "This session restarts in $delay s. End your turn now - do not start more work."
+            # The restart notice will quote this token; only the session that sees it here asked for the restart.
+            echo "restart token: $job_id" ;;
 esac
 printf '%s\n' "$plan"
 echo "log: $state_dir/$job_id.log"

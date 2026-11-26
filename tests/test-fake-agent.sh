@@ -2,7 +2,8 @@
 # Plays the agent's shell tool in test-restart-session.sh: it runs as a child of a stand-in
 # claude / codex / agy and calls restart-session.sh the way a real agent would.
 # Inputs (env): RS_TEST_SCRIPT, RS_TEST_MODE, RS_TEST_PROMPT_FILE, RS_TEST_SID_FILE, RS_TEST_DRYOUT, RS_TEST_RESTART,
-#               RS_TEST_OWN_SESSION, RS_TEST_TRANSCRIPTS (with CLAUDE_CONFIG_DIR pointing at a scratch directory)
+#               RS_TEST_OWN_SESSION, RS_TEST_TRANSCRIPTS (with CLAUDE_CONFIG_DIR pointing at a scratch directory),
+#               RS_TEST_DECOY_SESSION, RS_TEST_ARGV_DECOY
 set -u
 
 # Optionally play Claude Code's own bookkeeping: the per-process record of which session the
@@ -16,9 +17,14 @@ for t in ${RS_TEST_TRANSCRIPTS-}; do
     echo '{}' > "$CLAUDE_CONFIG_DIR/projects/proj/$t.jsonl"
 done
 
+# Optionally plant a record, claiming the stand-in is a different session, in a directory that the
+# stand-in was merely given as an ARGUMENT of the form CLAUDE_CONFIG_DIR=<dir>.
+if [ -n "${RS_TEST_ARGV_DECOY-}" ]; then
+    mkdir -p "$RS_TEST_ARGV_DECOY/sessions"
+    printf '{"sessionId":"%s"}\n' "$RS_TEST_DECOY_SESSION" > "$RS_TEST_ARGV_DECOY/sessions/$PPID.json"
 # Optionally play a misled agent: point OUR environment (the script's caller) at a decoy record
 # that claims the stand-in is a different session.
-if [ -n "${RS_TEST_DECOY_SESSION-}" ]; then
+elif [ -n "${RS_TEST_DECOY_SESSION-}" ]; then
     decoy="$CLAUDE_CONFIG_DIR-decoy"
     mkdir -p "$decoy/sessions" "$decoy/projects/proj"
     printf '{"sessionId":"%s"}\n' "$RS_TEST_DECOY_SESSION" > "$decoy/sessions/$PPID.json"
@@ -41,6 +47,7 @@ mv "$RS_TEST_DRYOUT.tmp" "$RS_TEST_DRYOUT"
 
 # Safety: go on only if the script targets the stand-in that launched us, never an agent further up.
 if [ "${RS_TEST_RESTART-}" = 1 ] && grep -q "\"agentPid\": $PPID," "$RS_TEST_DRYOUT"; then
-    bash "$RS_TEST_SCRIPT" "${args[@]}"
+    # What the script prints is what the calling session would see in its tool output.
+    bash "$RS_TEST_SCRIPT" "${args[@]}" | tee "$RS_TEST_DRYOUT.run"
     sleep 600
 fi
