@@ -1,5 +1,17 @@
 {
   "name": "session-agent-toolkit",
+  "displayName": "Session Agent Toolkit",
   "version": "0.1.0",
-  "description": "Lets an agent restart its own CLI session (or replace it with a fresh one) in the same terminal, e.g. to reload MCP servers while working unattended."
+  "description": "Lets an agent restart its own CLI session (or replace it with a fresh one) in the same terminal, e.g. to reload MCP servers while working unattended.",
+  "author": {
+    "name": "CLYEH"
+  },
+  "homepage": "https://github.com/CLYEH/session-agent-toolkit",
+  "repository": "https://github.com/CLYEH/session-agent-toolkit",
+  "license": "MIT",
+  "keywords": ["session", "restart", "mcp", "unattended"],
+  "suggestedPrompts": [
+    "Restart this session so the new MCP server loads, then continue.",
+    "Write a handoff note and continue this task in a new session."
+  ]
 }

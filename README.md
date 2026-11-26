@@ -26,9 +26,13 @@ codex plugin add session-agent-toolkit@session-agent-toolkit
 Antigravity:
 
 ```
-git clone https://github.com/CLYEH/session-agent-toolkit
-agy plugin install session-agent-toolkit/plugins/session-agent-toolkit
+agy plugin install https://github.com/CLYEH/session-agent-toolkit
 ```
+
+All three install straight from this repository. Claude Code and Codex read it as a marketplace
+(`.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json`). Antigravity has no
+third-party marketplaces - its `plugin@marketplace` form only knows Google's own catalogs - so it
+installs from the repository URL instead, picking the plugin up from `plugins/`.
 
 ## How it works
 
