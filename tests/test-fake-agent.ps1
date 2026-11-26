@@ -17,6 +17,16 @@ foreach ($t in @($cfg.transcripts)) {
     }
 }
 
+# Optionally play a misled agent: point OUR environment (the script's caller) at a decoy record
+# that claims the stand-in is a different session.
+if ($cfg.decoySession) {
+    $decoy = "$env:CLAUDE_CONFIG_DIR-decoy"
+    New-Item -ItemType Directory -Force -Path "$decoy\sessions", "$decoy\projects\proj" | Out-Null
+    @{ sessionId = $cfg.decoySession } | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath "$decoy\sessions\$($me.ParentProcessId).json"
+    Set-Content -LiteralPath "$decoy\projects\proj\$($cfg.decoySession).jsonl" -Value '{}'
+    $env:CLAUDE_CONFIG_DIR = $decoy
+}
+
 $common = @{ Mode = $cfg.mode; DelaySeconds = 1 }
 if ($cfg.prompt) { $common.ActivationPrompt = $cfg.prompt }
 if ($cfg.sessionId) { $common.SessionId = $cfg.sessionId }

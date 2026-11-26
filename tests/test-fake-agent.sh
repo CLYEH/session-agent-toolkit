@@ -16,6 +16,16 @@ for t in ${RS_TEST_TRANSCRIPTS-}; do
     echo '{}' > "$CLAUDE_CONFIG_DIR/projects/proj/$t.jsonl"
 done
 
+# Optionally play a misled agent: point OUR environment (the script's caller) at a decoy record
+# that claims the stand-in is a different session.
+if [ -n "${RS_TEST_DECOY_SESSION-}" ]; then
+    decoy="$CLAUDE_CONFIG_DIR-decoy"
+    mkdir -p "$decoy/sessions" "$decoy/projects/proj"
+    printf '{"sessionId":"%s"}\n' "$RS_TEST_DECOY_SESSION" > "$decoy/sessions/$PPID.json"
+    echo '{}' > "$decoy/projects/proj/$RS_TEST_DECOY_SESSION.jsonl"
+    export CLAUDE_CONFIG_DIR="$decoy"
+fi
+
 args=(--mode "$RS_TEST_MODE" --delay-seconds 1)
 if [ -n "${RS_TEST_PROMPT_FILE-}" ]; then
     IFS= read -r -d '' prompt < "$RS_TEST_PROMPT_FILE" || true     # whole file, newlines included

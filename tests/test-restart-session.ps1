@@ -115,7 +115,7 @@ function New-Config($o, [bool]$restart) {
     $cfg = Join-Path $work "cfg$n.json"
     $dryOut = Join-Path $work "dry$n.json"
     @{ script = $launcher; mode = $o.mode; prompt = $o.prompt; sessionId = $o.sessionId; ownSession = $o.ownSession
-       transcripts = @($o.transcripts); restart = $restart; dryOut = $dryOut } |
+       transcripts = @($o.transcripts); decoySession = $o.decoySession; restart = $restart; dryOut = $dryOut } |
         ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath $cfg
     @{ cfg = $cfg; dryOut = $dryOut }
 }
@@ -200,6 +200,11 @@ try {
     # For claude, "restart" must mean this session: its own record wins over whatever id the caller passes.
     $plan = Get-DryRunPlan 'claude' @{ mode = 'restart'; sessionId = $other; ownSession = $own; transcripts = $own, $other }
     Check 'claude restart resumes its own session, not the id the caller passed' `
+        ($plan.commandLine -ceq ((Get-ResumeCommand 'claude' $own) + " '" + $restartMessage + "'")) (Show $plan)
+    # ...and that record must be the agent's real one: a caller cannot swap in its own by changing its environment.
+    $decoy = [guid]::NewGuid().ToString()
+    $plan = Get-DryRunPlan 'claude' @{ mode = 'restart'; ownSession = $own; transcripts = $own, $other; decoySession = $decoy }
+    Check 'claude restart ignores session records the caller points it at' `
         ($plan.commandLine -ceq ((Get-ResumeCommand 'claude' $own) + " '" + $restartMessage + "'")) (Show $plan)
     $plan = Get-DryRunPlan 'claude' @{ mode = 'new' }
     Check 'new mode requires an activation prompt' ($plan.error -match 'requires -ActivationPrompt' -and -not $plan.commandLine) (Show $plan)

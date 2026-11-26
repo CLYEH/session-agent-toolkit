@@ -95,8 +95,27 @@ while [ -n "$agent_pid" ] && [ "$agent_pid" -gt 1 ]; do
 done
 [ -n "$kind" ] || die "not running inside a claude / codex / agy session (no such ancestor process)"
 
+# Claude Code's records are what the guards below rely on, so their location is taken from the
+# agent PROCESS (its own CLAUDE_CONFIG_DIR, else the user's real home) - never from this script's
+# environment, which is whatever the caller made it.
+agent_env() {   # NAME -> that variable in the agent process's environment, or nothing
+    if [ -r "/proc/$agent_pid/environ" ]; then
+        tr '\0' '\n' < "/proc/$agent_pid/environ" | sed -n "s/^$1=//p" | head -n 1
+    else
+        ps eww -o command= -p "$agent_pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n 1
+    fi
+}
+real_home() {   # from the user database, not from $HOME
+    local user; user=$(id -un)
+    case "$user" in ''|*[!A-Za-z0-9._-]*) printf '%s' "$HOME" ;; *) eval "printf '%s' ~$user" ;; esac
+}
+claude_dir=""
+if [ "$kind" = claude ]; then
+    claude_dir=$(agent_env CLAUDE_CONFIG_DIR)
+    [ -n "$claude_dir" ] || claude_dir="$(real_home)/.claude"
+fi
+
 # What the CLI itself says the current session is, when it says so.
-claude_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 own_session=""
 case "$kind" in
     claude)

@@ -87,9 +87,68 @@ if (-not $agent) { throw 'not running inside a claude / codex / agy session (no 
 $kind = [IO.Path]::GetFileNameWithoutExtension($agent.Name).ToLowerInvariant()
 
 # What the CLI itself says the current session is, when it says so.
-$claudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
 $ownSession = $null
 if ($kind -eq 'claude') {
+    # Claude Code's records are what the guards below rely on, so their location is taken from the
+    # agent PROCESS (its own CLAUDE_CONFIG_DIR, else the real profile folder) - never from this
+    # script's environment, which is whatever the caller made it.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class RestartSessionProcessEnvironment
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_BASIC_INFORMATION
+    {
+        public IntPtr ExitStatus; public IntPtr PebBaseAddress; public IntPtr AffinityMask;
+        public IntPtr BasePriority; public IntPtr UniqueProcessId; public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int infoClass, ref PROCESS_BASIC_INFORMATION info, int length, out int returned);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadProcessMemory(IntPtr h, IntPtr address, byte[] buffer, IntPtr size, out IntPtr read);
+
+    static bool Read(IntPtr h, IntPtr address, byte[] buffer)
+    {
+        IntPtr read;
+        return ReadProcessMemory(h, address, buffer, (IntPtr)buffer.Length, out read) && (long)read == buffer.Length;
+    }
+
+    // Value of an environment variable of another 64-bit process of the same user, or null.
+    public static string Get(uint pid, string name)
+    {
+        if (IntPtr.Size != 8) return null;
+        IntPtr h = OpenProcess(0x0410, false, pid);   // PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            PROCESS_BASIC_INFORMATION info = new PROCESS_BASIC_INFORMATION();
+            int returned;
+            if (NtQueryInformationProcess(h, 0, ref info, Marshal.SizeOf(info), out returned) != 0) return null;
+            byte[] pointer = new byte[8];
+            if (!Read(h, IntPtr.Add(info.PebBaseAddress, 0x20), pointer)) return null;       // PEB.ProcessParameters
+            IntPtr parameters = (IntPtr)BitConverter.ToInt64(pointer, 0);
+            if (!Read(h, IntPtr.Add(parameters, 0x80), pointer)) return null;                // .Environment
+            IntPtr environment = (IntPtr)BitConverter.ToInt64(pointer, 0);
+            if (!Read(h, IntPtr.Add(parameters, 0x3F0), pointer)) return null;               // .EnvironmentSize
+            long size = BitConverter.ToInt64(pointer, 0);
+            if (size <= 0 || size > 0x400000) return null;
+            byte[] block = new byte[size];
+            if (!Read(h, environment, block)) return null;
+            string prefix = name + "=";
+            foreach (string entry in Encoding.Unicode.GetString(block).Split('\0'))
+                if (entry.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return entry.Substring(prefix.Length);
+            return null;
+        }
+        finally { CloseHandle(h); }
+    }
+}
+'@
+    $claudeDir = [RestartSessionProcessEnvironment]::Get([uint32]$agent.ProcessId, 'CLAUDE_CONFIG_DIR')
+    if (-not $claudeDir) { $claudeDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
     $sessionRecord = Join-Path $claudeDir "sessions\$($agent.ProcessId).json"
     if (Test-Path -LiteralPath $sessionRecord) {
         $ownSession = (Get-Content -Raw -LiteralPath $sessionRecord | ConvertFrom-Json).sessionId

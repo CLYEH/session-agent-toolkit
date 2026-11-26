@@ -74,10 +74,10 @@ resume_command() {   # kind id
 
 # Run a stand-in agent of the given kind whose shell tool asks for a dry run; the output lands in $dry.
 n=0
-dry_run() {   # kind mode sid_file prompt_file [own_session [transcripts]]
+dry_run() {   # kind mode sid_file prompt_file [own_session [transcripts [decoy_session]]]
     n=$((n + 1)); dry="$work/dry$n.txt"
     RS_TEST_SCRIPT="$launcher" RS_TEST_MODE="$2" RS_TEST_SID_FILE="$3" RS_TEST_PROMPT_FILE="$4" \
-        RS_TEST_OWN_SESSION="${5-}" RS_TEST_TRANSCRIPTS="${6-}" \
+        RS_TEST_OWN_SESSION="${5-}" RS_TEST_TRANSCRIPTS="${6-}" RS_TEST_DECOY_SESSION="${7-}" \
         RS_TEST_DRYOUT="$dry" RS_TEST_CHILD="$fake" RS_TEST_OUT="" "$bin/$1" > /dev/null 2>&1
 }
 # The typed line is exactly: <template> "<notice>$(cat "<state dir>/<random id>.prompt.txt")"
@@ -124,6 +124,10 @@ refused_with 'takes no prompt'; check 'restart mode refuses a prompt' $? "got: $
 dry_run claude restart "$work/other.txt" "" "$own" "$own $other"
 grep -qF -- "\"commandLine\": $(json_str "$(resume_command claude "$own") '$restart_message'")" "$dry"
 check 'claude restart resumes its own session, not the id the caller passed' $? "got: $(cat "$dry")"
+# ...and that record must be the agent's real one: a caller cannot swap in its own by changing its environment.
+dry_run claude restart "" "" "$own" "$own $other" "$(new_uuid)"
+grep -qF -- "\"commandLine\": $(json_str "$(resume_command claude "$own") '$restart_message'")" "$dry"
+check 'claude restart ignores session records the caller points it at' $? "got: $(cat "$dry")"
 dry_run claude new "" ""
 refused_with 'requires --activation-prompt'; check 'new mode requires an activation prompt' $? "got: $(cat "$dry")"
 dry_run claude switch "$work/other.txt" "" "$own" "$own $other"
