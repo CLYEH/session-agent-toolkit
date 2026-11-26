@@ -72,16 +72,22 @@ while ($agent -and ('claude.exe', 'codex.exe', 'agy.exe' -notcontains $agent.Nam
 if (-not $agent) { throw 'not running inside a claude / codex / agy session (no such ancestor process)' }
 $kind = [IO.Path]::GetFileNameWithoutExtension($agent.Name).ToLowerInvariant()
 
-if ($Mode -eq 'restart') {
-    # Prefer the CLI's own record of the current session over what the caller passed.
-    if ($kind -eq 'claude') {
-        $sessionRecord = Join-Path $HOME ".claude\sessions\$($agent.ProcessId).json"
-        if (Test-Path -LiteralPath $sessionRecord) {
-            $SessionId = (Get-Content -Raw -LiteralPath $sessionRecord | ConvertFrom-Json).sessionId
-        }
+# What the CLI itself says the current session is, when it says so.
+$ownSession = $null
+if ($kind -eq 'claude') {
+    $sessionRecord = Join-Path $HOME ".claude\sessions\$($agent.ProcessId).json"
+    if (Test-Path -LiteralPath $sessionRecord) {
+        $ownSession = (Get-Content -Raw -LiteralPath $sessionRecord | ConvertFrom-Json).sessionId
     }
-    elseif (-not $SessionId -and $kind -eq 'codex') { $SessionId = if ($env:CODEX_THREAD_ID) { $env:CODEX_THREAD_ID } else { $env:CODEX_SESSION_ID } }
-    elseif (-not $SessionId -and $kind -eq 'agy') { $SessionId = $env:ANTIGRAVITY_CONVERSATION_ID }
+}
+elseif ($kind -eq 'codex') { $ownSession = if ($env:CODEX_THREAD_ID) { $env:CODEX_THREAD_ID } else { $env:CODEX_SESSION_ID } }
+elseif ($kind -eq 'agy') { $ownSession = $env:ANTIGRAVITY_CONVERSATION_ID }
+
+if ($Mode -eq 'restart') {
+    # claude keeps a per-process record, which beats what the caller passed; for the others the
+    # environment is only a fallback.
+    if ($kind -eq 'claude' -and $ownSession) { $SessionId = $ownSession }
+    if (-not $SessionId) { $SessionId = $ownSession }
     if (-not $SessionId) { throw "-SessionId is required: could not determine the current $kind session id" }
 }
 
@@ -100,7 +106,11 @@ $jobPath = Join-Path $dir "$id.job.json"
 $promptPath = Join-Path $dir "$id.prompt.txt"
 $written = @($jobPath)
 if ($Mode -eq 'new') {
-    [IO.File]::WriteAllText($promptPath, $ActivationPrompt, (New-Object Text.UTF8Encoding $false))
+    # Tell the new session where it came from. This continues the fixed notice the helper types in
+    # front (which says an agent, not the user, wrote what follows).
+    $origin = if ("$ownSession" -match '\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\z') { "$kind session $ownSession" } else { "$kind session (id unknown)" }
+    $body = "`n`nStarted by: $origin`nTool: $PSCommandPath -Mode new`nHandoff note from that agent:`n`n$ActivationPrompt"
+    [IO.File]::WriteAllText($promptPath, $body, (New-Object Text.UTF8Encoding $false))
     $written += $promptPath
 }
 @{

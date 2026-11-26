@@ -83,10 +83,13 @@ $canary = Join-Path $work 'pwned'
 # quote break-outs for both quote styles, a subexpression, Escape (clears the line), Backspace.
 $hostile = "--dangerously-skip-permissions`n'; New-Item '$canary'; '`"; New-Item `"$canary`"; `" `$(New-Item '$canary') " +
     [char]27 + [char]8 + ' ' + [char]0x91CD + [char]0x555F
-$expectedPromptArg = '[restart-session] ' + $hostile.Replace('"', "'")
 $restartMessage = '[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
-# The only thing that may ever be typed after the per-CLI "new" template: load <random id>.prompt.txt.
-$promptExpr = [regex]::Escape('(''[restart-session] '' + (Get-Content -Raw -Encoding UTF8 -LiteralPath "$env:LOCALAPPDATA\restart-session\') +
+# A new session must be told, in words the caller cannot remove or change, that an agent - not the
+# user - wrote its first message; otherwise a misled agent could hand its instructions on as "the user's".
+$notice = '[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
+$expectedPromptArg = ($notice + "`n`nStarted by: claude session (id unknown)`nTool: $launcher -Mode new`nHandoff note from that agent:`n`n" + $hostile).Replace('"', "'")
+# The only thing that may ever be typed after the per-CLI "new" template: the fixed notice, then load <random id>.prompt.txt.
+$promptExpr = [regex]::Escape("('$notice' + (Get-Content -Raw -Encoding UTF8 -LiteralPath `"`$env:LOCALAPPDATA\restart-session\") +
     '[0-9a-f]{32}' + [regex]::Escape('.prompt.txt")).Replace(''"'', "''")')
 
 $n = 0
@@ -143,7 +146,7 @@ try {
         Check "$kind restart: typed line is exactly the fixed resume command" `
             ($plan.commandLine -ceq ($restartTemplates[$kind] + " '" + $restartMessage + "'")) "got <$($plan.commandLine)> error <$($plan.error)>"
         $plan = Get-DryRunPlan $kind 'new' $null $hostile
-        Check "$kind new: typed line is the fixed template, with nothing from the prompt" `
+        Check "$kind new: typed line is the fixed template and notice, with nothing from the prompt" `
             ($plan.commandLine -cmatch ('\A' + [regex]::Escape($newTemplates[$kind]) + ' ' + $promptExpr + '\z')) "got <$($plan.commandLine)> error <$($plan.error)>"
     }
     $badIds = [ordered]@{
@@ -173,7 +176,7 @@ try {
     $after = Invoke-EndToEnd 'new' $null $hostile
     if ($after) {
         Check 'new: starts a fresh session (no resume arguments)' ($after.args.Count -eq 1) "argv <$($after.args -join '> <')>"
-        Check 'new: hostile activation prompt is one inert argument' ($after.args[0] -ceq $expectedPromptArg) `
+        Check 'new: one inert argument - the notice, where it came from, then the hostile prompt' ($after.args[0] -ceq $expectedPromptArg) `
             "expected <$expectedPromptArg> got <$($after.args[0])>"
     }
     Check 'nothing from a prompt or session id was executed' (-not (Test-Path $canary)) "$canary was created"

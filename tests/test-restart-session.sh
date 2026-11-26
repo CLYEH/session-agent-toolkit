@@ -51,6 +51,9 @@ canary="$work/pwned"
 hostile=$(printf -- "--dangerously-skip-permissions\n'; touch '%s'; '\"; touch \"%s\"; \" \$(touch '%s') \`touch %s\` \033\010 \\\\ \xe9\x87\x8d\xe5\x95\x9f" "$canary" "$canary" "$canary" "$canary")
 printf '%s' "$hostile" > "$work/hostile.txt"
 restart_message='[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
+# A new session must be told, in words the caller cannot remove or change, that an agent - not the
+# user - wrote its first message; otherwise a misled agent could hand its instructions on as "the user's".
+notice='[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
 
 # Run a stand-in agent of the given kind whose shell tool asks for a dry run; the output lands in $dry.
 n=0
@@ -74,10 +77,10 @@ for kind in claude codex agy; do
     check "$kind restart: typed line is exactly the fixed resume command" $? "got: $(cat "$dry")"
 
     dry_run "$kind" new "" "$work/hostile.txt"
-    # The only thing that may follow the template: load <random id>.prompt.txt inside double quotes.
-    expected_re="^  \"commandLine\": \"$fresh \\\\\"\\[restart-session\\] \\\$\\(cat \\\\\"\\\$HOME/\\.local/state/restart-session/[0-9a-f]{32}\\.prompt\\.txt\\\\\"\\)\\\\\"\"\$"
-    grep -qE -- "$expected_re" "$dry"
-    check "$kind new: typed line is the fixed template, with nothing from the prompt" $? "got: $(cat "$dry")"
+    # The only thing that may follow the template: the fixed notice, then load <random id>.prompt.txt.
+    id=$(sed -n 's/.*restart-session\/\([0-9a-f]\{32\}\)\.prompt\.txt.*/\1/p' "$dry")
+    [ -n "$id" ] && grep -qF -- "\"commandLine\": $(json_str "$fresh \"$notice\$(cat \"\$HOME/.local/state/restart-session/$id.prompt.txt\")\"")" "$dry"
+    check "$kind new: typed line is the fixed template and notice, with nothing from the prompt" $? "got: $(cat "$dry")"
 done
 
 bad_id() {   # label, session id bytes (printf format)
@@ -141,8 +144,8 @@ if end_to_end restart "$work/sid.txt" ""; then
     check 'restart: resumes the same session with the fixed notice' $? "argv: $(tr '\0' '|' < "$after_args")"
 fi
 if end_to_end new "" "$work/hostile.txt"; then
-    printf '%s\0' "[restart-session] $hostile" | cmp -s - "$after_args"
-    check 'new: fresh session whose only argument is the inert hostile prompt' $? "argv: $(tr '\0' '|' < "$after_args" | od -c | head -n 12)"
+    printf '%s\n\nStarted by: claude session (id unknown)\nTool: %s --mode new\nHandoff note from that agent:\n\n%s\0' "$notice" "$launcher" "$hostile" | cmp -s - "$after_args"
+    check 'new: one inert argument - the notice, where it came from, then the hostile prompt' $? "argv: $(tr '\0' '|' < "$after_args" | od -c | head -n 16)"
 fi
 [ ! -e "$canary" ]; check 'nothing from a prompt or session id was executed' $? "$canary was created"
 

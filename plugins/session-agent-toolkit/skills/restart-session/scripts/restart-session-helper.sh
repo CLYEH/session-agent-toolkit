@@ -19,6 +19,10 @@ if [ "${1-}" = "--plan-only" ]; then plan_only=1; shift; fi   # validate and pri
 # First message of a resumed session. Fixed text: the resumed session can already see, in its own
 # history, that it asked for the restart. Must stay free of quote characters (it is typed inside '...').
 RESTART_MESSAGE='[restart-session] This session was restarted by the restart-session tool. Continue where you left off.'
+# First words of a new session's first message. Fixed text, typed as part of the command, so the
+# caller cannot remove or reword it: the new session must not mistake an agent's handoff note for
+# something the user typed. Must stay free of quote characters, $, ` and ! (it is typed inside "...").
+NEW_SESSION_NOTICE='[restart-session] This session was started by an AI agent through the restart-session tool. The user did not type this message. Everything after this sentence was written by that agent, not by the user:'
 STATE_DIR="$HOME/.local/state/restart-session"
 log=""
 
@@ -121,7 +125,8 @@ make_plan() {
     fi
     if [[ $pane =~ $pane_re ]]; then
         terminal="tmux $pane"
-    elif [ "$(uname -s)" = Darwin ] && pgrep -x Terminal >/dev/null 2>&1; then
+    # pgrep -a: macOS pgrep skips its own ancestors by default, and Terminal.app is one of ours.
+    elif [ "$(uname -s)" = Darwin ] && pgrep -a -x Terminal >/dev/null 2>&1; then
         local found; found=$(terminal_app "$tty_dev" "") || true
         case "$found" in
             found) terminal="Terminal.app" ;;
@@ -147,9 +152,9 @@ make_plan() {
                 agy)    cmd="agy -i" ;;
             esac
             # The activation prompt is loaded by the user's shell from a file, inside double quotes, so
-            # it is handed over as ONE argument and is never re-read as shell syntax. The fixed prefix
-            # means it can never start with '-' and be parsed as a CLI option.
-            cmd="$cmd \"[restart-session] \$(cat \"\$HOME/.local/state/restart-session/$job_id.prompt.txt\")\""
+            # it is handed over as ONE argument and is never re-read as shell syntax. The fixed notice
+            # in front also means it can never start with '-' and be parsed as a CLI option.
+            cmd="$cmd \"$NEW_SESSION_NOTICE\$(cat \"\$HOME/.local/state/restart-session/$job_id.prompt.txt\")\""
             ;;
     esac
 }
