@@ -1,0 +1,5 @@
+{
+  "name": "session-agent-toolkit",
+  "version": "0.1.0",
+  "description": "Lets an agent restart its own CLI session (or replace it with a fresh one) in the same terminal, e.g. to reload MCP servers while working unattended."
+}

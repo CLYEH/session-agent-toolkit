@@ -1,0 +1,23 @@
+{
+  "name": "session-agent-toolkit",
+  "owner": {
+    "name": "CLYEH"
+  },
+  "metadata": {
+    "description": "Session tools for coding agents: let an agent restart its own CLI session, or hand over to a fresh one, in the same terminal.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "session-agent-toolkit",
+      "source": "./plugins/session-agent-toolkit",
+      "description": "Lets an agent restart its own CLI session (or replace it with a fresh one) in the same terminal, e.g. to reload MCP servers while working unattended.",
+      "version": "0.1.0",
+      "author": {
+        "name": "CLYEH"
+      },
+      "keywords": ["session", "restart", "mcp", "unattended"],
+      "category": "productivity"
+    }
+  ]
+}

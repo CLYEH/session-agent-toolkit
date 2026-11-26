@@ -1,0 +1,20 @@
+{
+  "name": "session-agent-toolkit",
+  "interface": {
+    "displayName": "Session Agent Toolkit"
+  },
+  "plugins": [
+    {
+      "name": "session-agent-toolkit",
+      "source": {
+        "source": "local",
+        "path": "./plugins/session-agent-toolkit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
