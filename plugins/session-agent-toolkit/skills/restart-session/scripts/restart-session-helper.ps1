@@ -115,17 +115,6 @@ try {
     Write-Log "helper started; waiting ${delay}s"
     Start-Sleep -Seconds $delay
 
-    $plan = Get-Plan
-    Write-Log ("taskkill: " + ((cmd.exe /c "taskkill /PID $($plan.agentPid) /T /F 2>&1") -join ' | '))
-
-    $deadline = (Get-Date).AddSeconds(15)
-    while (Get-Proc $plan.agentPid) {
-        if ((Get-Date) -gt $deadline) { throw "agent pid $($plan.agentPid) did not exit" }
-        Start-Sleep -Milliseconds 200
-    }
-    if (-not (Get-Proc $plan.shellPid)) { throw "shell pid $($plan.shellPid) is gone; nothing typed" }
-    Start-Sleep -Milliseconds 1500   # let the shell get back to its prompt
-
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -159,6 +148,59 @@ public static class RestartSessionConsole
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool WriteConsoleInputW(IntPtr h, [In] INPUT_RECORD[] buffer, uint length, out uint written);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern short VkKeyScanW(char ch);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetConsoleMode(IntPtr h, out uint mode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleMode(IntPtr h, uint mode);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool WriteConsoleW(IntPtr h, string text, uint length, out uint written, IntPtr reserved);
+
+    // Attach to the console of process `pid` and open its input ("CONIN$") or output ("CONOUT$").
+    static IntPtr Attach(uint pid, string device)
+    {
+        FreeConsole();
+        if (!AttachConsole(pid))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "AttachConsole(" + pid + ") failed");
+        IntPtr h = CreateFileW(device, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1))
+        {
+            int error = Marshal.GetLastWin32Error();
+            FreeConsole();
+            throw new Win32Exception(error, "opening " + device + " failed");
+        }
+        return h;
+    }
+
+    // Put the console input back in the mode a shell expects to find (the Windows default, 0x1F7:
+    // line input, echo, Ctrl+C processing, quick edit...). A TUI switches it to raw VT input and,
+    // when killed, leaves it that way for every program started afterwards.
+    public static void RestoreInputMode(uint pid)
+    {
+        IntPtr h = Attach(pid, "CONIN$");
+        try
+        {
+            if (!SetConsoleMode(h, 0x1F7))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "SetConsoleMode failed");
+        }
+        finally { CloseHandle(h); FreeConsole(); }
+    }
+
+    // Turn off the terminal modes a killed TUI leaves on: focus reporting and bracketed paste
+    // (both measured after killing Claude Code), plus mouse tracking, the alternate screen and a
+    // hidden cursor, which other TUIs or renderers use.
+    public static void ResetTerminalModes(uint pid)
+    {
+        IntPtr h = Attach(pid, "CONOUT$");
+        try
+        {
+            uint mode, written;
+            if (!GetConsoleMode(h, out mode))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetConsoleMode failed");
+            SetConsoleMode(h, mode | 0x4); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            string reset = "\u001b[?1004l\u001b[?2004l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1049l\u001b[?25h";
+            WriteConsoleW(h, reset, (uint)reset.Length, out written, IntPtr.Zero);
+            SetConsoleMode(h, mode);
+        }
+        finally { CloseHandle(h); FreeConsole(); }
+    }
 
     // Type text into the console that process `pid` is attached to, as if on its keyboard.
     public static void Type(uint pid, string text)
@@ -214,6 +256,24 @@ public static class RestartSessionConsole
     }
 }
 '@
+    $plan = Get-Plan
+
+    # The agent is killed outright, so it cannot put the terminal back the way it found it; do that
+    # for it. The input mode has to be restored BEFORE the kill: the shell notes "the mode to give
+    # the next program" the moment it gets its prompt back.
+    [RestartSessionConsole]::RestoreInputMode([uint32]$plan.shellPid)
+    Write-Log ("taskkill: " + ((cmd.exe /c "taskkill /PID $($plan.agentPid) /T /F 2>&1") -join ' | '))
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while (Get-Proc $plan.agentPid) {
+        if ((Get-Date) -gt $deadline) { throw "agent pid $($plan.agentPid) did not exit" }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not (Get-Proc $plan.shellPid)) { throw "shell pid $($plan.shellPid) is gone; nothing typed" }
+    try { [RestartSessionConsole]::ResetTerminalModes([uint32]$plan.shellPid) }
+    catch { Write-Log "could not reset terminal modes: $_" }
+    Start-Sleep -Milliseconds 1500   # let the shell get back to its prompt
+
     # Escape first: clears anything already sitting on the shell's input line.
     [RestartSessionConsole]::Type([uint32]$plan.shellPid, [string][char]27 + $plan.commandLine + "`r")
     Write-Log "typed: $($plan.commandLine)"

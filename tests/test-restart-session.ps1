@@ -11,7 +11,8 @@
 #     caller cannot remove; and a plain restart cannot carry a prompt or be aimed at another session.
 #  C. It actually works: old agent gone, next one started by the SAME interactive shell (= same
 #     terminal tab), with the right arguments for the mode, and the helper survives the death of
-#     the agent that launched it.
+#     the agent that launched it. The agent is killed outright, so the console it had switched
+#     to raw input must be handed back in the normal mode - a real TUI cannot clean up after itself.
 $ErrorActionPreference = 'Stop'
 
 $root     = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -45,7 +46,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Runtime.InteropServices;
 static class Stub {
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+    [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint mode);
     static string Json(string s) {
         StringBuilder b = new StringBuilder("\"");
         foreach (char c in s) {
@@ -62,6 +66,8 @@ static class Stub {
             for (int i = 0; i < args.Length; i++) { if (i > 0) j.Append(','); j.Append(Json(args[i])); }
             File.WriteAllText(outPath, j.Append("]}").ToString());
         }
+        // Like a TUI: switch the console to raw VT input (0x208) and never switch it back.
+        if (Environment.GetEnvironmentVariable("RS_TEST_RAW_INPUT") == "1") SetConsoleMode(GetStdHandle(-10), 0x208);
         string child = Environment.GetEnvironmentVariable("RS_TEST_CHILD");
         if (!string.IsNullOrEmpty(child)) {
             ProcessStartInfo si = new ProcessStartInfo("pwsh.exe", "-NoProfile -File \"" + child + "\"");
@@ -130,7 +136,7 @@ function Invoke-EndToEnd($o) {
     # Stand-in is first on PATH, so the typed "claude ..." starts it again; after the first one is
     # killed the shell switches the stand-in to "record argv and idle".
     $inner = "`$env:PATH='$bin;'+`$env:PATH; `$env:RS_TEST_CONFIG='$($c.cfg)'; `$env:RS_TEST_OUT='$out1'; " +
-             "`$env:RS_TEST_CHILD='$fake'; claude; `$env:RS_TEST_OUT='$out2'; `$env:RS_TEST_CHILD=''"
+             "`$env:RS_TEST_CHILD='$fake'; `$env:RS_TEST_RAW_INPUT='1'; claude; `$env:RS_TEST_OUT='$out2'; `$env:RS_TEST_CHILD=''; `$env:RS_TEST_RAW_INPUT=''"
     Start-Process pwsh -WindowStyle Minimized -ArgumentList "-NoProfile -NoExit -Command `"$inner`"" | Out-Null
 
     $before = Wait-ForJson $out1 30
@@ -146,6 +152,11 @@ function Invoke-EndToEnd($o) {
         Check "$mode`: old agent process is gone"  (-not (Get-Process -Id $before.pid -ErrorAction SilentlyContinue)) "pid $($before.pid) still alive" | Out-Host
         Check "$mode`: next agent is a new process" ($after.pid -ne $before.pid) "same pid $($after.pid)" | Out-Host
         Check "$mode`: started by the same shell"   ($newParent -eq $shellPid) "before shell $shellPid, after shell $newParent" | Out-Host
+        # What the next agent inherited: line input + echo + Ctrl+C processing (0x7) back on, raw VT input (0x200) off.
+        $env:RS_TEST_MODE_OUT = Join-Path $work "mode$n.txt"
+        pwsh -NoProfile -File (Join-Path $root 'tests\get-console-input-mode.ps1') -TargetPid $shellPid
+        $inputMode = if (Test-Path $env:RS_TEST_MODE_OUT) { [int](Get-Content -Raw $env:RS_TEST_MODE_OUT) } else { -1 }
+        Check "$mode`: console is handed back in normal input mode after the kill" (($inputMode -band 0x207) -eq 0x7) ("input mode 0x{0:X}" -f $inputMode) | Out-Host
     }
     $after
 }
