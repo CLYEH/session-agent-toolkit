@@ -44,14 +44,15 @@ end, stops the agent process tree, and types the next command into the shell tha
 
 | Platform | Requirement | Tested |
 |---|---|---|
-| Windows | Agent launched from PowerShell (pwsh or Windows PowerShell), any terminal | stand-in agents; a real Claude Code session |
-| macOS | Agent running in Terminal.app, or inside tmux | see the `tests` workflow |
-| Linux | Agent running inside tmux | stand-in agents |
+| Windows | Agent launched from PowerShell (pwsh or Windows PowerShell), any terminal | stand-in agents in CI; a real Claude Code session |
+| macOS | Agent running in Terminal.app, or inside tmux | stand-in agents in CI (both terminals) |
+| Linux | Agent running inside tmux | stand-in agents in CI |
 
 There is no universal way to type into a terminal from outside on macOS / Linux, so each terminal
 needs its own support. Not supported yet: iTerm2, and Linux terminals outside tmux.
 
-Codex and Antigravity have only been tested with stand-in agents, not with real sessions.
+Stand-in agents are small scripts named like the real CLIs; they check what gets stopped and typed.
+Only Claude Code on Windows has been run end to end with a real session.
 
 ## Safety
 
