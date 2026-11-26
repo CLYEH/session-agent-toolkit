@@ -38,20 +38,21 @@ end, stops the agent process tree, and types the next command into the shell tha
 | Mode | What starts next | Typed command (claude) |
 |---|---|---|
 | `restart` (default) | The same conversation, resumed, with a fixed notice as its first message | `claude --resume <session-id> '<fixed restart notice>'` |
-| `new` | A fresh conversation that starts from an activation prompt | `claude "<activation prompt, loaded from a file>"` |
+| `new` | A fresh conversation that starts from an activation prompt | `claude "<fixed notice><origin and activation prompt, loaded from a file>"` |
 
 ## Platform support
 
 | Platform | Requirement | Tested |
 |---|---|---|
-| Windows | Agent launched from PowerShell (pwsh or Windows PowerShell), any terminal | stand-in agents; a real Claude Code session |
-| macOS | Agent running in Terminal.app, or inside tmux | see the `tests` workflow |
-| Linux | Agent running inside tmux | stand-in agents |
+| Windows | Agent launched from PowerShell (pwsh or Windows PowerShell), any terminal | stand-in agents in CI; a real Claude Code session |
+| macOS | Agent running in Terminal.app, or inside tmux | stand-in agents in CI (both terminals) |
+| Linux | Agent running inside tmux | stand-in agents in CI |
 
 There is no universal way to type into a terminal from outside on macOS / Linux, so each terminal
 needs its own support. Not supported yet: iTerm2, and Linux terminals outside tmux.
 
-Codex and Antigravity have only been tested with stand-in agents, not with real sessions.
+Stand-in agents are small scripts named like the real CLIs; they check what gets stopped and typed.
+Only Claude Code on Windows has been run end to end with a real session.
 
 ## Safety
 
@@ -63,6 +64,10 @@ The script is meant to run without a permission prompt, so the caller controls v
 - `restart` mode has no prompt at all. In `new` mode the activation prompt is never typed: it is
   written to a file and loaded by the typed command as one prefixed argument, so it cannot become
   shell syntax or a CLI option.
+- A new session is told where it came from. Its first message starts with a fixed notice - part
+  of the typed command, so the calling agent cannot remove or reword it - saying that an AI agent
+  started the session and that the user did not type the message, followed by the originating
+  session id (when known) and the path of the script. The activation prompt comes after that.
 
 If you allow-list it, allow only `restart-session.ps1` / `restart-session.sh`. Never allow-list
 `restart-session-helper.*`: that half does the typing and trusts its caller to be the launcher.

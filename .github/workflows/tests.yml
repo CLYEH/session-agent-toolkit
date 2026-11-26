@@ -8,47 +8,25 @@ jobs:
   linux-tmux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
       - run: bash tests/run-in-tmux.sh
 
   macos-tmux:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: brew install tmux
       - run: bash tests/run-in-tmux.sh
 
   macos-terminal-app:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: bash tests/run-in-terminal-app.sh
 
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: pwsh -NoProfile -File tests/test-restart-session.ps1
-
-  # Not a test: records how a real Claude Code process shows up in `ps` on each OS, because the
-  # scripts find the agent by process name. Never blocks the build.
-  real-cli-process-names:
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - run: |
-          if command -v brew >/dev/null; then brew install tmux; else sudo apt-get update -qq && sudo apt-get install -y -qq tmux; fi
-          curl -fsSL https://claude.ai/install.sh | bash
-          export PATH="$HOME/.local/bin:$PATH"
-          tmux new-session -d -s c -x 120 -y 40 "bash --norc --noprofile -i"
-          tmux send-keys -t c "claude" Enter
-          sleep 15
-          echo "--- processes under the tmux pane"
-          shell_pid=$(tmux list-panes -t c -F '#{pane_pid}')
-          ps -o pid=,ppid=,comm=,args= -p "$shell_pid"
-          for p in $(pgrep -P "$shell_pid"); do ps -o pid=,ppid=,comm= -p "$p"; ps -o args= -p "$p" | cut -c1-120; done

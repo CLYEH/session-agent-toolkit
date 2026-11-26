@@ -83,16 +83,22 @@ while [ -n "$agent_pid" ] && [ "$agent_pid" -gt 1 ]; do
 done
 [ -n "$kind" ] || die "not running inside a claude / codex / agy session (no such ancestor process)"
 
+# What the CLI itself says the current session is, when it says so.
+own_session=""
+case "$kind" in
+    claude)
+        if [ -f "$HOME/.claude/sessions/$agent_pid.json" ]; then
+            own_session=$(sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.claude/sessions/$agent_pid.json" | head -n 1)
+        fi ;;
+    codex) own_session=${CODEX_THREAD_ID:-${CODEX_SESSION_ID-}} ;;
+    agy)   own_session=${ANTIGRAVITY_CONVERSATION_ID-} ;;
+esac
+
 if [ "$mode" = restart ]; then
-    # Prefer the CLI's own record of the current session over what the caller passed.
-    case "$kind" in
-        claude)
-            if [ -f "$HOME/.claude/sessions/$agent_pid.json" ]; then
-                session_id=$(sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.claude/sessions/$agent_pid.json" | head -n 1)
-            fi ;;
-        codex) [ -n "$session_id" ] || session_id=${CODEX_THREAD_ID:-${CODEX_SESSION_ID-}} ;;
-        agy)   [ -n "$session_id" ] || session_id=${ANTIGRAVITY_CONVERSATION_ID-} ;;
-    esac
+    # claude keeps a per-process record, which beats what the caller passed; for the others the
+    # environment is only a fallback.
+    if [ "$kind" = claude ] && [ -n "$own_session" ]; then session_id=$own_session; fi
+    [ -n "$session_id" ] || session_id=$own_session
     [ -n "$session_id" ] || die "--session-id is required: could not determine the current $kind session id"
 fi
 
@@ -108,10 +114,18 @@ find "$state_dir" -type f -mtime +7 -exec rm -f {} + 2>/dev/null || true
 
 job_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 prompt_file="$state_dir/$job_id.prompt.txt"
-if [ "$mode" = new ]; then printf '%s' "$prompt" > "$prompt_file"; fi
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$mode" = new ]; then
+    # Tell the new session where it came from. This continues the fixed notice the helper types in
+    # front (which says an agent, not the user, wrote what follows).
+    uuid_re='^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+    if [[ $own_session =~ $uuid_re ]]; then origin="$kind session $own_session"; else origin="$kind session (id unknown)"; fi
+    printf '\n\nStarted by: %s\nTool: %s --mode new\nHandoff note from that agent:\n\n%s' \
+        "$origin" "$here/restart-session.sh" "$prompt" > "$prompt_file"
+fi
 
 # The helper validates everything and builds the command line; ask it for the plan before committing.
-helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restart-session-helper.sh"
+helper="$here/restart-session-helper.sh"
 set -- "$mode" "$kind" "$agent_pid" "$(proc_start "$agent_pid")" "$session_id" "$job_id" "$delay"
 if ! plan=$(bash "$helper" --plan-only "$@" 2>&1); then
     rm -f "$prompt_file"
